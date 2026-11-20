@@ -93,19 +93,12 @@ bool CAudioPlayer_PreDestroy(void *self)
             object_unlock_exclusive(&outputMix->mObject);
         } else {
             // Mixer is mid-pass: request and wait for it to unlink the track.
-            extern unsigned int sceKernelGetProcessTimeLow(void); // sl_switch.c
-            extern int debugPrintf(char *text, ...);              // util.c
-            static int waits = 0;
-            unsigned int t0 = sceKernelGetProcessTimeLow();
+
             this->mDestroyRequested = true;
             while (this->mDestroyRequested) {
                 object_cond_wait(self);
             }
             // Mixer thread has acknowledged the request.
-            int n = ++waits;
-            if (n <= 12 || (n % 500) == 0)
-                debugPrintf("SL: AudioPlayer destroy waited %u us for mixer (wait #%d)\n",
-                            sceKernelGetProcessTimeLow() - t0, n);
         }
     }
 

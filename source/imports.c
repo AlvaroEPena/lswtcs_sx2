@@ -65,6 +65,8 @@ int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
   return 0;
 }
 
+static int guest_printf_silent(const char *format, ...) { (void)format; return 0; }
+
 static void sincos_fake(double x, double *s, double *c) {
   *s = sin(x);
   *c = cos(x);
@@ -264,11 +266,11 @@ DynLibFunction dynlib_functions[] = {
   { "fputc", (uintptr_t)&fputc_fake },
   { "fread", (uintptr_t)&fread_fake },
   { "fseek", (uintptr_t)&fseek_fake },
-  { "ftell", (uintptr_t)&ftell },
+  { "ftell", (uintptr_t)&ftell_fake },
   { "fwrite", (uintptr_t)&fwrite_fake },
   { "getc", (uintptr_t)&getc_fake },
-  { "printf", (uintptr_t)&debugPrintf },
-  { "putc", (uintptr_t)&putc },
+  { "printf", (uintptr_t)&guest_printf_silent },
+  { "putc", (uintptr_t)&putc_recorded },
   { "putchar", (uintptr_t)&putchar },
   { "puts", (uintptr_t)&puts },
   { "snprintf", (uintptr_t)&snprintf },
@@ -412,7 +414,7 @@ DynLibFunction dynlib_functions[] = {
   { "pthread_create", (uintptr_t)&pthread_create_soloader },
   { "pthread_detach", (uintptr_t)&pthread_detach_soloader },
   { "pthread_equal", (uintptr_t)&pthread_equal_soloader },
-  { "pthread_exit", (uintptr_t)&pthread_exit },
+  { "pthread_exit", (uintptr_t)&pthread_exit_soloader },
   { "pthread_getschedparam", (uintptr_t)&pthread_getschedparam_soloader },
   { "pthread_getspecific", (uintptr_t)&pthread_getspecific },
   { "pthread_join", (uintptr_t)&pthread_join_soloader },

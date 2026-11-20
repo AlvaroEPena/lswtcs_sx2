@@ -152,6 +152,7 @@ static void *call_object(const char *name, va_list va) {
 static void call_void(const char *name, va_list va) {
   if (!strcmp(name, "FlurryEvent")) {
     void *s = va_arg(va, void *);
+    (void)s;
     debugPrintf("JNI: FlurryEvent(%s)\n", s ? obj_str(s) : "(null)");
     return;
   }

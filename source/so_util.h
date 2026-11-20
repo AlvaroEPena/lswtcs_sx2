@@ -30,6 +30,11 @@ typedef struct so_module {
   void *load_base, *load_virtbase;
   size_t load_size;
   void *load_memrv; // VirtmemReservation *
+#ifdef __SWITCH2__
+  void *nro_backing;
+  size_t nro_size, rw_offset;
+  uint64_t nro_address;
+#endif
 
   // copy of the unmodified program headers (link-time vaddrs),
   // needed for dl_iterate_phdr / exception unwinding
@@ -65,6 +70,8 @@ uintptr_t so_try_find_addr_rx(so_module *mod, const char *symbol);
 uintptr_t so_try_find_addr(so_module *mod, const char *symbol);
 DynLibFunction *so_find_import(DynLibFunction *funcs, int num_funcs, const char *name);
 void so_finalize(so_module *mod);
+void so_publish_data(so_module *mod);
+uintptr_t *so_relocation_target(so_module *mod, uint64_t offset);
 int so_unload(so_module *mod);
 
 // dl_iterate_phdr() replacement operating on all loaded modules;

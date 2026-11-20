@@ -6,6 +6,7 @@
 
 // applies engine-level patches to the loaded libTTapp.so (control mapping)
 void patch_game(void);
+void patch_game_code(void);
 
 // hooks/egl.c: release the sticky GL-context ownership before a game thread
 // blocks (cond wait / sleep), so parked threads can't starve the renderer

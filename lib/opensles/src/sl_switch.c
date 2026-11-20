@@ -46,7 +46,6 @@ SceUInt32 sceKernelGetProcessTimeLow(void)
 
 /** \brief Called by SDL to fill the next audio output buffer */
 
-extern int debugPrintf(char *text, ...); // util.c
 
 static void SDLCALL SDL_callback(void *context, Uint8 *stream, int len)
 {
@@ -60,13 +59,7 @@ static void SDLCALL SDL_callback(void *context, Uint8 *stream, int len)
         // keep the audio mixer off the render/main cores (SDL spawned this
         // thread outside our pthread trampoline, so it'd default onto a hot core)
         pthr_pin_bg_core();
-        const int priorityResult = SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
-        s32 priority = -1;
-        const Result getPriorityResult = svcGetThreadPriority(&priority,
-            CUR_THREAD_HANDLE);
-        debugPrintf("SL: audio callback alive (len=%d, priority=%d, boost=%s)\n",
-            len, R_SUCCEEDED(getPriorityResult) ? priority : -1,
-            priorityResult == 0 ? "ok" : SDL_GetError());
+        SDL_SetThreadPriority(SDL_THREAD_PRIORITY_HIGH);
         first = 0;
     }
     IEngine *thisEngine = (IEngine *) context;

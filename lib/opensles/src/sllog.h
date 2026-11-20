@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+#include "util.h"
+
 // Logging
 
 // In order of decreasing priority, the log priority levels are:
@@ -83,7 +85,6 @@ extern const char slLogTag[];
 #elif defined(__SWITCH__)
 
 // route OpenSL ES diagnostics into the port's debug.log (util.c)
-extern int debugPrintf(char *text, ...);
 #define SL_LOGE(...) do { debugPrintf("SL_LOGE: %s:%d ", __FUNCTION__, __LINE__); \
     debugPrintf(__VA_ARGS__); debugPrintf("\n"); } while (0)
 #define SL_LOGW(...) do { debugPrintf("SL_LOGW: %s:%d ", __FUNCTION__, __LINE__); \

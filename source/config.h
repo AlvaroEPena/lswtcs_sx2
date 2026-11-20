@@ -19,14 +19,16 @@
 #define LOG_NAME "debug.log"
 
 // Diagnostic build switch: writes debug.log next to the .nro (mirrored over
-// nxlink), enables the heartbeat/deadman instrumentation and GL probes.
+// nxlink) and enables nonfatal heartbeat/stall diagnostics.
 // Per-line SD writes cost seconds of boot; uncomment only to chase a bug.
-//#define DEBUG_LOG 1
+// #define DEBUG_LOG 1
+// Optional GPU readback probes are expensive; keep off during normal play.
+// #define DEBUG_GL_PROBES 1
 
 // --- Android-side identity handed to the game (mirrors lswtcs-vita) ---------
 
 #define ANDROID_MANUFACTURER "Nintendo"
-#define ANDROID_MODEL "Switch"
+#define ANDROID_MODEL "Switch 2"
 #define ANDROID_VERSION_RELEASE "5.0.2"
 #define APK_VERSION_NAME "2.0.2.02"
 
@@ -65,6 +67,8 @@ typedef struct {
   int screen_height;
   int language;        // -1 = follow system; else index into the lang table
   int sfx_volume;      // mono WAV/SFX trim in percent; stereo Ogg/cutscenes are unaffected
+  int show_fps;        // presentation-rate HUD, toggled by the native port menu
+  int fps_size;        // 0 small, 1 medium, 2 large
 } Config;
 
 extern Config config;

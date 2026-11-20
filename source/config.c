@@ -18,7 +18,9 @@
   CONFIG_VAR_INT(screen_width); \
   CONFIG_VAR_INT(screen_height); \
   CONFIG_VAR_INT(language); \
-  CONFIG_VAR_INT(sfx_volume);
+  CONFIG_VAR_INT(sfx_volume); \
+  CONFIG_VAR_INT(show_fps); \
+  CONFIG_VAR_INT(fps_size);
 
 Config config;
 
@@ -45,6 +47,7 @@ int read_config(const char *file) {
   config.screen_height = -1;
   config.language = -1;      // follow the console language
   config.sfx_volume = 70;    // extra trim after equal-power mono-to-stereo routing
+  config.fps_size = 1;
   opensles_mono_sfx_gain_percent = config.sfx_volume;
 
   FILE *f = fopen(file, "r");
@@ -61,8 +64,9 @@ int read_config(const char *file) {
       if (*tmp != 0) {
         *tmp = 0;
         for (value = tmp + 1; *value && isspace((int)*value); ++value);
-        for (tmp = value + strlen(value) - 1; isspace((int)*tmp); --tmp) *tmp = 0;
-        parse_var(name, value);
+        size_t length = strlen(value);
+        while (length && isspace((unsigned char)value[length - 1])) value[--length] = 0;
+        if (length) parse_var(name, value);
       }
     }
   } while (!feof(f));
@@ -74,6 +78,8 @@ int read_config(const char *file) {
   else if (config.sfx_volume > 100)
     config.sfx_volume = 100;
   opensles_mono_sfx_gain_percent = config.sfx_volume;
+  config.show_fps = config.show_fps != 0;
+  if (config.fps_size < 0 || config.fps_size > 2) config.fps_size = 1;
 
   return 0;
 }

@@ -46,6 +46,7 @@ void userAppExit(void) {
 
 #endif
 
+#ifdef DEBUG_LOG
 int debugPrintf(char *text, ...) {
 #ifdef DEBUG_LOG
   // Keep the log file open for the life of the process. Reopening it on every
@@ -75,7 +76,8 @@ int debugPrintf(char *text, ...) {
   return 0;
 }
 
-// boost the CPU to 1785MHz while loading
+#endif
+
 void cpu_boost(int on) {
   appletSetCpuBoostMode(on ? ApmCpuBoostMode_FastLoad : ApmCpuBoostMode_Normal);
 }

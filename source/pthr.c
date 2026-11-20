@@ -142,7 +142,7 @@ static int cond_static_init(pthread_cond_t_bionic *cond, const pthread_condattr_
 // ---------------------------------------------------------------------------
 
 static Mutex core_lock;
-static int core_list[4];
+static int core_list[64];
 static int core_count = 0;
 static unsigned core_rr = 0;
 static uintptr_t role_android_main = 0;
@@ -153,10 +153,16 @@ static void core_init_once(void) {
   if (core_count)
     return;
   u64 mask = 0;
-  if (R_FAILED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || mask == 0)
-    mask = 0x7; // fallback: cores 0,1,2 (typical homebrew allotment)
-  for (int c = 0; c < 4; c++)
-    if (mask & (1u << c))
+  if (R_FAILED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)) || mask == 0) {
+    s32 ideal = -1;
+    if (R_FAILED(svcGetThreadCoreMask(&ideal, &mask, CUR_THREAD_HANDLE)) || !mask) {
+      core_list[0] = -1; // Retain scheduler affinity when discovery fails.
+      core_count = 1;
+      return;
+    }
+  }
+  for (int c = 0; c < 64; c++)
+    if (mask & (1ull << c))
       core_list[core_count++] = c;
   debugPrintf("pthr: %d cores available (mask 0x%x)\n", core_count, (unsigned)mask);
 }
@@ -171,7 +177,7 @@ static void assign_core_slot(unsigned slot) {
   const int core = core_list[slot % core_count];
   mutexUnlock(&core_lock);
   // preferred core + single-core affinity mask = hard pin, like the Vita pins
-  svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+  if (core >= 0) svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1ull << core);
 }
 
 // background threads (audio, resource loaders, GC, etc.) round-robin over the
@@ -187,7 +193,7 @@ static void assign_core_bg(void) {
   if (bg_count <= 0) { bg_start = 0; bg_count = core_count; }
   const int core = core_list[bg_start + (core_rr++ % (unsigned)bg_count)];
   mutexUnlock(&core_lock);
-  svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core);
+  if (core >= 0) svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1ull << core);
 }
 
 // pin the calling thread to a background core. For threads our vendored code
@@ -256,6 +262,12 @@ static void *thread_trampoline(void *p) {
   extern void egl_gl_ownership_release(void);
   egl_gl_ownership_release();
   return ret;
+}
+
+void pthread_exit_soloader(void *value) {
+  extern void egl_gl_ownership_release(void);
+  egl_gl_ownership_release();
+  pthread_exit(value);
 }
 
 int pthread_create_soloader(pthread_t *thread, const pthread_attr_t_bionic *attr,

@@ -60,7 +60,8 @@ char *__strrchr_chk_fake(const char *s, int c, size_t slen) {
 
 long __read_chk_fake(int fd, void *buf, size_t count, size_t buf_size) {
   (void)buf_size;
-  return read(fd, buf, count);
+  const long result=read(fd,buf,count);
+  return result;
 }
 
 char *__strcat_chk_fake(char *dst, const char *src, size_t dstlen) {
@@ -303,12 +304,14 @@ int open_fake(const char *path, int flags, ...) {
     mode = va_arg(va, int);
     va_end(va);
   }
-  return open(fix_path(path), convert_open_flags(flags), mode);
+  const int result=open(fix_path(path),convert_open_flags(flags),mode);
+  return result;
 }
 
 // bionic's fortified open with no variadic mode (read/existing files)
 int open2_fake(const char *path, int flags) {
-  return open(fix_path(path), convert_open_flags(flags), 0666);
+  const int result=open(fix_path(path),convert_open_flags(flags),0666);
+  return result;
 }
 
 int openat_fake(int dirfd, const char *path, int flags, ...) {
@@ -320,20 +323,24 @@ int openat_fake(int dirfd, const char *path, int flags, ...) {
     mode = va_arg(va, int);
     va_end(va);
   }
-  return open(fix_path(path), convert_open_flags(flags), mode);
+  const int result=open(fix_path(path),convert_open_flags(flags),mode);
+  return result;
 }
 
 int unlinkat_fake(int dirfd, const char *path, int flags) {
   (void)dirfd; (void)flags;
-  return unlink(fix_path(path));
+  const int result=unlink(fix_path(path));
+  return result;
 }
 
 int mkdir_fake(const char *path, unsigned int mode) {
-  return mkdir(fix_path(path), mode);
+  const int result=mkdir(fix_path(path), mode);
+  return result;
 }
 
 int remove_fake(const char *path) {
-  return remove(fix_path(path));
+  const int result=remove(fix_path(path));
+  return result;
 }
 
 int rename_fake(const char *from, const char *to) {
@@ -347,11 +354,13 @@ int rename_fake(const char *from, const char *to) {
   // clearing the existing target first every save after the first silently
   // fails and all progress is lost on reload. remove() gives POSIX semantics.
   remove(t);
-  return rename(f, t);
+  const int result=rename(f,t);
+  return result;
 }
 
 int chdir_fake(const char *path) {
-  return chdir(fix_path(path));
+  const int result=chdir(fix_path(path));
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -597,49 +606,59 @@ static int is_fake_file(const void *f) {
 }
 
 size_t fwrite_fake(const void *ptr, size_t size, size_t n, FILE *f) {
+  size_t result;
   if (is_fake_file(f)) {
+    const int saved_errno=errno;
 #ifdef DEBUG_LOG
     static char buf[0x400];
     const size_t total = size * n < sizeof(buf) - 1 ? size * n : sizeof(buf) - 1;
-    memcpy(buf, ptr, total);
-    buf[total] = '\0';
-    debugPrintf("stdio: %s", buf);
+    memcpy(buf,ptr,total);
+    buf[total]='\0';
+    debugPrintf("stdio: %s",buf);
 #endif
-    return n;
-  }
-  return fwrite(ptr, size, n, f);
+    errno=saved_errno;
+    result=n;
+  } else result=fwrite(ptr,size,n,f);
+  return result;
 }
 
 size_t fread_fake(void *ptr, size_t size, size_t n, FILE *f) {
-  if (is_fake_file(f))
-    return 0;
-  return fread(ptr, size, n, f);
+  const size_t result=is_fake_file(f) ? 0 : fread(ptr,size,n,f);
+  return result;
 }
 
 int fputc_fake(int c, FILE *f) {
-  if (is_fake_file(f))
-    return c;
-  return fputc(c, f);
+  const int result=is_fake_file(f) ? c : fputc(c,f);
+  return result;
+}
+
+// putc was bound directly to newlib; preserve that behavior (including fake
+// stream handling) while adding diagnostics, rather than adopting fputc_fake.
+int putc_recorded(int c, FILE *f) {
+  const int result=putc(c,f), saved_errno=errno;
+  errno=saved_errno;
+  return result;
 }
 
 int fputs_fake(const char *s, FILE *f) {
+  int result;
   if (is_fake_file(f)) {
-    debugPrintf("stdio: %s", s);
-    return 0;
-  }
-  return fputs(s, f);
+    const int saved_errno=errno;
+    debugPrintf("stdio: %s",s);
+    errno=saved_errno;
+    result=0;
+  } else result=fputs(s,f);
+  return result;
 }
 
 int fflush_fake(FILE *f) {
-  if (is_fake_file(f) || f == NULL)
-    return 0;
-  return fflush(f);
+  const int result=(is_fake_file(f) || f==NULL) ? 0 : fflush(f);
+  return result;
 }
 
 int fclose_fake(FILE *f) {
-  if (is_fake_file(f))
-    return 0;
-  return fclose(f);
+  const int result=is_fake_file(f) ? 0 : fclose(f);
+  return result;
 }
 
 int ferror_fake(FILE *f) {
@@ -679,30 +698,35 @@ int vfprintf_fake(FILE *f, const char *fmt, va_list va) {
     static char buf[0x400];
     int ret = vsnprintf(buf, sizeof(buf), fmt, va);
     debugPrintf("stdio: %s", buf);
+    const int saved_errno=errno;
+    errno=saved_errno;
     return ret;
 #else
     return 0;
 #endif
   }
-  return vfprintf(f, fmt, va);
+  const int ret=vfprintf(f,fmt,va), saved_errno=errno;
+  errno=saved_errno;
+  return ret;
 }
 
 int fseek_fake(FILE *f, long off, int whence) {
-  if (is_fake_file(f))
-    return -1;
-  return fseek(f, off, whence);
+  const int result=is_fake_file(f) ? -1 : fseek(f,off,whence);
+  return result;
+}
+long ftell_fake(FILE *f) {
+  const long result=ftell(f);
+  return result;
 }
 
 int getc_fake(FILE *f) {
-  if (is_fake_file(f))
-    return -1; // EOF
-  return getc(f);
+  const int result=is_fake_file(f) ? -1 : getc(f);
+  return result;
 }
 
 int ungetc_fake(int c, FILE *f) {
-  if (is_fake_file(f))
-    return -1;
-  return ungetc(c, f);
+  const int result=is_fake_file(f) ? -1 : ungetc(c,f);
+  return result;
 }
 
 void setbuf_fake(FILE *f, char *buf) {
@@ -729,17 +753,19 @@ void *AAssetManager_fromJava_fake(void *env, void *mgr) {
 // streams the multi-hundred-MB .dat packs with many small reads/seeks, and
 // fsdev round trips dominate without buffering.
 FILE *fopen_fake(const char *path, const char *mode) {
-  const char *p = fix_path(path);
-  FILE *f = fopen(p, mode);
-  if (f && strchr(mode, 'r')) {
-    const char *ext = strrchr(p, '.');
-    if (ext && strcasecmp(ext, ".dat") == 0)
-      setvbuf(f, NULL, _IOFBF, 256 * 1024);
+  const char *p=fix_path(path);
+  FILE *f=fopen(p,mode);
+  const int saved_errno=errno;
+  if (f && strchr(mode,'r')) {
+    const char *ext=strrchr(p,'.');
+    if (ext && strcasecmp(ext,".dat")==0)
+      setvbuf(f,NULL,_IOFBF,256*1024);
   }
   if (!f)
-    debugPrintf("fopen(%s => %s, %s) FAILED\n", path, p, mode);
+    debugPrintf("fopen(%s => %s, %s) FAILED stream=%p errno=%d\n",path,p,mode,(void*)f,saved_errno);
   else
-    debugPrintf("fopen(%s, %s) ok\n", p, mode);
+    debugPrintf("fopen(%s, %s) ok stream=%p\n",p,mode,(void*)f);
+  errno=saved_errno;
   return f;
 }
 
@@ -750,24 +776,27 @@ FILE *fopen_fake(const char *path, const char *mode) {
 // ---------------------------------------------------------------------------
 
 void *AAssetManager_open_fake(void *mgr, const char *path, int mode) {
-  (void)mgr; (void)mode;
+  (void)mgr;
   char full[1024];
-  snprintf(full, sizeof(full), "assets/%s", path);
-  FILE *f = fopen(full, "rb");
-  debugPrintf("AAsset: open(%s) -> %s\n", full, f ? "ok" : "MISSING");
-  if (!f)
+  snprintf(full,sizeof(full),"assets/%s",path);
+  FILE *f=fopen(full,"rb");
+  const int open_errno=errno;
+  debugPrintf("AAsset: open(%s) -> %s stream=%p errno=%d\n",full,f ? "ok" : "MISSING",(void*)f,open_errno);
+  errno=open_errno;
+  if (!f) {
     return NULL;
-  setvbuf(f, NULL, _IOFBF, 16 * 1024);
-  Asset *a = malloc(sizeof(*a));
-  a->f = f;
-  fseek(f, 0, SEEK_END);
-  a->size = ftell(f);
-  fseek(f, 0, SEEK_SET);
+  }
+  setvbuf(f,NULL,_IOFBF,16*1024);
+  Asset *a=malloc(sizeof(*a));
+  a->f=f;
+  fseek(f,0,SEEK_END);
+  a->size=ftell(f);
+  fseek(f,0,SEEK_SET);
   return a;
 }
 
 void AAsset_close_fake(void *asset) {
-  Asset *a = asset;
+  Asset *a=asset;
   if (a) {
     fclose(a->f);
     free(a);
@@ -775,19 +804,19 @@ void AAsset_close_fake(void *asset) {
 }
 
 int AAsset_read_fake(void *asset, void *buf, size_t count) {
-  Asset *a = asset;
-  return a ? (int)fread(buf, 1, count, a->f) : -1;
+  Asset *a=asset;
+  const int result=a ? (int)fread(buf,1,count,a->f) : -1;
+  return result;
 }
 
 long AAsset_seek_fake(void *asset, long off, int whence) {
-  Asset *a = asset;
-  if (!a || fseek(a->f, off, whence) < 0)
-    return -1;
-  return ftell(a->f);
+  Asset *a=asset;
+  const long result=(!a || fseek(a->f,off,whence)<0) ? -1 : ftell(a->f);
+  return result;
 }
 
 int64_t AAsset_seek64_fake(void *asset, int64_t off, int whence) {
-  return AAsset_seek_fake(asset, (long)off, whence);
+  return AAsset_seek_fake(asset,(long)off,whence);
 }
 
 long AAsset_getLength_fake(void *asset) {

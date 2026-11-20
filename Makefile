@@ -7,13 +7,13 @@ $(error "Please set DEVKITPRO in your environment. export DEVKITPRO=<path to>/de
 endif
 
 TOPDIR ?= $(CURDIR)
-include $(DEVKITPRO)/libnx/switch_rules
+include $(DEVKITPRO)/libounce/switch2_rules
 
 #---------------------------------------------------------------------------------
-TARGET		:=	$(notdir $(CURDIR))
-APP_TITLE	:=	LEGO Star Wars: The Complete Saga
-APP_AUTHOR	:=	naga
-APP_VERSION	:=	1.0.4
+TARGET		:=	lswtcs-sx2
+APP_TITLE	:=	LSWTCS Switch 2
+APP_AUTHOR	:=	NaGaa95 / AlvaroEPena
+APP_VERSION	:=	0.4.0
 BUILD		:=	build
 SOURCES		:=	source source/hooks lib/opensles/src
 DATA		:=	data
@@ -22,7 +22,7 @@ INCLUDES	:=	source lib/opensles/include lib/opensles/src
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
-ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
+ARCH	:=	$(SWITCH2_CPU) -mtp=soft -fPIE
 
 # OpenSL ES (vendored AOSP "Wilhelm") build flags, matching the Vita port:
 # software mixer (OUTPUTMIXEXT) pulled by the SDL2 backend, LSWTCS timing tweaks
@@ -31,6 +31,7 @@ DEFINES	:=	-DUSE_SDL -DUSE_OUTPUTMIXEXT -DLSWTCS -D__SWITCH__
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(ARCH) $(DEFINES)
 CFLAGS	+=	$(INCLUDE)
+CFLAGS += -DNDEBUG
 CXXFLAGS	:= $(CFLAGS)
 
 ASFLAGS	:=	-g $(ARCH)
@@ -40,7 +41,7 @@ LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*
 # Publish all EGL presentation paths, including guest import tables.
 LDFLAGS += -Wl,--wrap=eglSwapBuffers,--wrap=eglGetProcAddress,--wrap=__libnx_exit
 
-LIBS	:= -lSDL2 -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lnx -lm
+LIBS	:= -lSDL2 -lEGL -lGLESv2 -lglapi -ldrm_nouveau -lkaihen -lounce_core -lm
 
 #---------------------------------------------------------------------------------
 LIBDIRS	:= $(PORTLIBS) $(LIBNX)
@@ -59,7 +60,9 @@ export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
 CFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
 CPPFILES	:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.cpp)))
+CFILES := $(filter-out crash_report.c diag_io.c flight_recorder.c thread_samples.c,$(CFILES))
 SFILES		:=	$(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.s)))
+SFILES := $(filter-out load_trace.s,$(SFILES))
 BINFILES	:=	$(foreach dir,$(DATA),$(notdir $(wildcard $(dir)/*.*)))
 
 #---------------------------------------------------------------------------------

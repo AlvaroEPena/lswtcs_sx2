@@ -11,7 +11,12 @@
 
 #include <stdint.h>
 
+#include "config.h"
+#ifdef DEBUG_LOG
 int debugPrintf(char *text, ...);
+#else
+#define debugPrintf(...) ((void)0)
+#endif
 
 void cpu_boost(int on);
 
@@ -20,12 +25,14 @@ int retm1(void);
 
 static inline void* armGetTlsRw(void) {
   void* ret;
-  __asm__ ("mrs %x[data], s3_3_c13_c0_2" : [data] "=r" (ret));
+  // This register changes independently of C variables. Without volatile,
+  // GCC can reuse a pre-write MRS result across armSetTlsRw/callbacks.
+  __asm__ volatile ("mrs %x[data], s3_3_c13_c0_2" : [data] "=r" (ret) : : "memory");
   return ret;
 }
 
 static inline void armSetTlsRw(void *addr) {
-  __asm__  ("msr s3_3_c13_c0_2, %0" : : "r"(addr));
+  __asm__ volatile ("msr s3_3_c13_c0_2, %0" : : "r"(addr) : "memory");
 }
 
 static inline uint64_t umin(uint64_t a, uint64_t b) {

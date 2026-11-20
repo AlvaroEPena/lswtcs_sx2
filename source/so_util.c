@@ -22,6 +22,9 @@
 #include "so_util.h"
 #include "util.h"
 #include "error.h"
+#ifdef __SWITCH2__
+#include <kaihen.h>
+#endif
 
 // not in devkitA64's elf.h
 #ifndef DT_RELR
@@ -34,6 +37,93 @@
 #define DT_ANDROID_RELRENT 0x6fffe003
 
 static so_module *so_list = NULL;
+
+// Android text stays immutable after RO maps it. Every relocation must land
+// wholly in an original writable segment, not just an alignment gap.
+uintptr_t *so_relocation_target(so_module *mod, uint64_t offset) {
+  if (offset > mod->load_size || mod->load_size - offset < sizeof(uintptr_t))
+    fatal_error("Relocation outside module: %llx", (unsigned long long)offset);
+#ifdef __SWITCH2__
+  bool writable = false;
+  for (int i = 0; i < mod->phnum; ++i) {
+    const Elf64_Phdr *p = &mod->phdr[i];
+    if (p->p_type == PT_LOAD && (p->p_flags & PF_W) &&
+        offset >= p->p_vaddr && offset - p->p_vaddr <= p->p_memsz &&
+        p->p_memsz - (offset - p->p_vaddr) >= sizeof(uintptr_t))
+      writable = true;
+  }
+  if (!writable || offset < mod->rw_offset)
+    fatal_error("Unsupported text/read-only relocation at %llx.\n"
+                "This build requires all relocations in writable data.",
+                (unsigned long long)offset);
+#endif
+  return (uintptr_t *)((uintptr_t)mod->load_base + offset);
+}
+
+#ifdef __SWITCH2__
+static void so_finalize_ro(so_module *mod) {
+  const size_t prefix = 0x1000;
+  size_t text_end = 0, rw_start = mod->load_size;
+  for (int i = 0; i < mod->phnum; ++i) {
+    const Elf64_Phdr *p = &mod->phdr[i];
+    if (p->p_type != PT_LOAD || !p->p_memsz) continue;
+    if ((p->p_flags & (PF_X | PF_W)) == (PF_X | PF_W))
+      fatal_error("Unsupported writable/executable ELF segment.");
+    if (p->p_flags & PF_X) {
+      const size_t end = ALIGN_MEM(p->p_vaddr + p->p_memsz, 0x1000);
+      if (end > text_end) text_end = end;
+    }
+    if ((p->p_flags & PF_W) && (p->p_vaddr & ~0xfffull) < rw_start)
+      rw_start = p->p_vaddr & ~0xfffull;
+  }
+  if (!text_end || rw_start <= text_end || rw_start >= mod->load_size ||
+      mod->load_size > UINT32_MAX - prefix)
+    fatal_error("ELF layout cannot be mapped by this RO backend.\n"
+                "Need separate code, read-only page(s), writable data.");
+  mod->rw_offset = rw_start;
+  mod->nro_size = prefix + mod->load_size;
+  mod->nro_backing = memalign(0x1000, mod->nro_size);
+  if (!mod->nro_backing) fatal_error("Out of memory creating RO image.");
+  memset(mod->nro_backing, 0, mod->nro_size);
+  memcpy((char *)mod->nro_backing + prefix, mod->load_base, mod->load_size);
+  NroHeader *hdr = (NroHeader *)((char *)mod->nro_backing + sizeof(NroStart));
+  hdr->magic = NROHEADER_MAGIC;
+  hdr->size = mod->nro_size;
+  hdr->unk2 = 1; // Read-only header page; executable ELF starts after it.
+  hdr->segments[0] = (NroSegment){0, prefix + text_end};
+  hdr->segments[1] = (NroSegment){prefix + text_end, rw_start - text_end};
+  hdr->segments[2] = (NroSegment){prefix + rw_start, mod->load_size - rw_start};
+  sha256CalculateHash(hdr->build_id, mod->load_base, mod->load_size);
+  armDCacheFlush(mod->nro_backing, mod->nro_size);
+  Service ro;
+  Result rc = kaihenGetRoSession(&ro);
+  if (R_FAILED(rc)) fatal_error("kaiHEN RO session unavailable: %08x", rc);
+  const struct { u64 pid, image, size, bss, bss_size; } in = {
+    0, (u64)mod->nro_backing, mod->nro_size, 0, 0
+  };
+  rc = serviceDispatchInOut(&ro, 0, in, mod->nro_address, .in_send_pid = true);
+  if (R_FAILED(rc)) fatal_error("kaiHEN RO LoadNro failed: %08x\n"
+                               "Check that your kaiHEN runtime supports native RO loading.", rc);
+  // RO owns/protects nro_backing until UnloadNro. load_base remains a
+  // DIFFERENT, accessible staging allocation; never read nro_backing here.
+  mod->load_virtbase = (void *)(mod->nro_address + prefix);
+  for (int i = 0; i < mod->phnum; ++i)
+    mod->prog_hdr[i].p_vaddr = mod->phdr[i].p_vaddr + (uintptr_t)mod->load_virtbase;
+  debugPrintf("RO mapped %s at %p; RW starts +%lx\n", mod->name,
+              mod->load_virtbase, (unsigned long)mod->rw_offset);
+}
+#endif
+
+void so_publish_data(so_module *mod) {
+#ifdef __SWITCH2__
+  memcpy((char *)mod->load_virtbase + mod->rw_offset,
+         (char *)mod->load_base + mod->rw_offset, mod->load_size - mod->rw_offset);
+  armDCacheFlush((char *)mod->load_virtbase + mod->rw_offset,
+                 mod->load_size - mod->rw_offset);
+#else
+  (void)mod;
+#endif
+}
 
 void hook_arm64(uintptr_t addr, uintptr_t dst) {
   if (addr == 0)
@@ -55,6 +145,9 @@ void so_free_temp(so_module *mod) {
 }
 
 void so_finalize(so_module *mod) {
+#ifdef __SWITCH2__
+  so_finalize_ro(mod);
+#else
   Result rc = 0;
 
   // map the entire thing as code memory
@@ -100,6 +193,7 @@ void so_finalize(so_module *mod) {
   }
 
   free(is_x_page);
+#endif
 }
 
 int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
@@ -122,18 +216,47 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
     return -2;
   }
 
-  fread(mod->so_base, mod->so_size, 1, fd);
+  const size_t bytes_read = fread(mod->so_base, 1, mod->so_size, fd);
   fclose(fd);
 
-  if (memcmp(mod->so_base, ELFMAG, SELFMAG) != 0) {
+  const unsigned char *ident = mod->so_base;
+  if (bytes_read != mod->so_size || mod->so_size < sizeof(Elf64_Ehdr) ||
+      memcmp(ident, ELFMAG, SELFMAG) || ident[EI_CLASS] != ELFCLASS64 ||
+      ident[EI_DATA] != ELFDATA2LSB) {
+    debugPrintf("%s: expected ELF64 little-endian AArch64 (arm64-v8a)\n", filename);
     res = -1;
     goto err_free_so;
   }
 
   mod->elf_hdr = (Elf64_Ehdr *)mod->so_base;
+  if (mod->elf_hdr->e_machine != EM_AARCH64 || mod->elf_hdr->e_type != ET_DYN ||
+      mod->elf_hdr->e_phentsize != sizeof(Elf64_Phdr) ||
+      mod->elf_hdr->e_shentsize != sizeof(Elf64_Shdr) ||
+      mod->elf_hdr->e_phoff > mod->so_size || mod->elf_hdr->e_shoff > mod->so_size ||
+      mod->elf_hdr->e_phnum > (mod->so_size - mod->elf_hdr->e_phoff) / sizeof(Elf64_Phdr) ||
+      mod->elf_hdr->e_shnum > (mod->so_size - mod->elf_hdr->e_shoff) / sizeof(Elf64_Shdr) ||
+      !mod->elf_hdr->e_shnum || mod->elf_hdr->e_shstrndx >= mod->elf_hdr->e_shnum) {
+    res = -4;
+    goto err_free_so;
+  }
   mod->prog_hdr = (Elf64_Phdr *)((uintptr_t)mod->so_base + mod->elf_hdr->e_phoff);
   mod->sec_hdr = (Elf64_Shdr *)((uintptr_t)mod->so_base + mod->elf_hdr->e_shoff);
-  mod->shstrtab = (char *)((uintptr_t)mod->so_base + mod->sec_hdr[mod->elf_hdr->e_shstrndx].sh_offset);
+  const Elf64_Shdr *shstr = &mod->sec_hdr[mod->elf_hdr->e_shstrndx];
+  if (shstr->sh_offset > mod->so_size || shstr->sh_size > mod->so_size - shstr->sh_offset) {
+    res = -4;
+    goto err_free_so;
+  }
+  mod->shstrtab = (char *)mod->so_base + shstr->sh_offset;
+  for (int i = 0; i < mod->elf_hdr->e_shnum; ++i) {
+    const Elf64_Shdr *s = &mod->sec_hdr[i];
+    if (s->sh_name >= shstr->sh_size ||
+        !memchr(mod->shstrtab + s->sh_name, 0, shstr->sh_size - s->sh_name) ||
+        (s->sh_type != SHT_NOBITS && (s->sh_offset > mod->so_size ||
+         s->sh_size > mod->so_size - s->sh_offset))) {
+      res = -4;
+      goto err_free_so;
+    }
+  }
 
   if (mod->elf_hdr->e_phnum > SO_MAX_SEGMENTS * 2) {
     debugPrintf("so_load: %s has too many program headers (%d)\n", filename, mod->elf_hdr->e_phnum);
@@ -148,7 +271,19 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
   // total size of the LOAD zone = highest vaddr+memsz of all LOAD segments
   mod->load_size = 0;
   for (int i = 0; i < mod->elf_hdr->e_phnum; i++) {
+    const Elf64_Phdr *all = &mod->prog_hdr[i];
+    if (all->p_offset > mod->so_size || all->p_filesz > mod->so_size - all->p_offset) {
+      res = -4;
+      goto err_free_so;
+    }
     if (mod->prog_hdr[i].p_type == PT_LOAD) {
+      const Elf64_Phdr *p = &mod->prog_hdr[i];
+      if (p->p_filesz > p->p_memsz || p->p_offset > mod->so_size ||
+          p->p_filesz > mod->so_size - p->p_offset ||
+          p->p_vaddr > max_size || p->p_memsz > max_size - p->p_vaddr) {
+        res = -4;
+        goto err_free_so;
+      }
       const size_t seg_end = mod->prog_hdr[i].p_vaddr + mod->prog_hdr[i].p_memsz;
       if (seg_end > mod->load_size)
         mod->load_size = seg_end;
@@ -157,9 +292,33 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
 
   // align total size to page size
   mod->load_size = ALIGN_MEM(mod->load_size, 0x1000);
-  if (mod->load_size > max_size) {
+  if (!mod->load_size || mod->load_size > max_size) {
     res = -3;
     goto err_free_so;
+  }
+
+  // Metadata consumed as virtual addresses must be covered by PT_LOAD.
+  for (int i = 0; i < mod->elf_hdr->e_shnum; ++i) {
+    const Elf64_Shdr *s = &mod->sec_hdr[i];
+    const char *name = mod->shstrtab + s->sh_name;
+    const bool needed = !strcmp(name, ".dynsym") || !strcmp(name, ".dynstr") ||
+                        !strcmp(name, ".rela.dyn") || !strcmp(name, ".rela.plt") ||
+                        !strcmp(name, ".init_array");
+    if (!needed) continue;
+    bool covered = false;
+    for (int j = 0; j < mod->phnum; ++j) {
+      const Elf64_Phdr *p = &mod->phdr[j];
+      if (p->p_type == PT_LOAD && s->sh_addr >= p->p_vaddr &&
+          s->sh_addr - p->p_vaddr <= p->p_memsz &&
+          s->sh_size <= p->p_memsz - (s->sh_addr - p->p_vaddr)) covered = true;
+    }
+    size_t stride = !strcmp(name, ".dynsym") ? sizeof(Elf64_Sym) :
+                    !strcmp(name, ".init_array") ? sizeof(uintptr_t) :
+                    strncmp(name, ".rela.", 6) == 0 ? sizeof(Elf64_Rela) : 1;
+    if (!covered || s->sh_size % stride) {
+      res = -4;
+      goto err_free_so;
+    }
   }
 
   mod->load_base = base;
@@ -167,10 +326,12 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
   memset(mod->load_base, 0, mod->load_size);
 
   // reserve virtual memory space for the entire LOAD zone
+#ifndef __SWITCH2__
   virtmemLock();
   mod->load_virtbase = virtmemFindCodeMemory(mod->load_size, 0x1000);
   mod->load_memrv = virtmemAddReservation(mod->load_virtbase, mod->load_size);
   virtmemUnlock();
+#endif
 
   debugPrintf("%s: load base = %p, size = %u KB\n", filename, mod->load_virtbase, (u32)(mod->load_size / 1024));
 
@@ -188,6 +349,7 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
 
   mod->syms = NULL;
   mod->dynstrtab = NULL;
+  size_t dynstr_size = 0;
 
   for (int i = 0; i < mod->elf_hdr->e_shnum; i++) {
     char *sh_name = mod->shstrtab + mod->sec_hdr[i].sh_name;
@@ -196,12 +358,20 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
       mod->num_syms = mod->sec_hdr[i].sh_size / sizeof(Elf64_Sym);
     } else if (strcmp(sh_name, ".dynstr") == 0) {
       mod->dynstrtab = (char *)((uintptr_t)mod->load_base + mod->sec_hdr[i].sh_addr);
+      dynstr_size = mod->sec_hdr[i].sh_size;
     }
   }
 
   if (mod->syms == NULL || mod->dynstrtab == NULL) {
     res = -2;
     goto err_free_load;
+  }
+  for (int i = 0; i < mod->num_syms; ++i) {
+    const size_t off = mod->syms[i].st_name;
+    if (off >= dynstr_size || !memchr(mod->dynstrtab + off, 0, dynstr_size - off)) {
+      res = -4;
+      goto err_free_load;
+    }
   }
 
   // register in the global module list (append, load order matters for resolution)
@@ -217,9 +387,11 @@ int so_load(so_module *mod, const char *filename, void *base, size_t max_size) {
   return 0;
 
 err_free_load:
+#ifndef __SWITCH2__
   virtmemLock();
   virtmemRemoveReservation(mod->load_memrv);
   virtmemUnlock();
+#endif
 err_free_so:
   free(mod->so_base);
   mod->so_base = NULL;
@@ -232,9 +404,10 @@ static Elf64_Xword so_dynamic_tag(so_module *mod, Elf64_Sxword tag) {
   for (int i = 0; i < mod->phnum; i++) {
     if (mod->phdr[i].p_type == PT_DYNAMIC) {
       const Elf64_Dyn *dyn = (const Elf64_Dyn *)((uintptr_t)mod->so_base + mod->phdr[i].p_offset);
-      for (; dyn->d_tag != DT_NULL; dyn++)
-        if (dyn->d_tag == tag)
-          return dyn->d_un.d_val;
+      const size_t count = mod->phdr[i].p_filesz / sizeof(*dyn);
+      for (size_t j = 0; j < count && dyn[j].d_tag != DT_NULL; ++j)
+        if (dyn[j].d_tag == tag)
+          return dyn[j].d_un.d_val;
     }
   }
   return 0;
@@ -250,13 +423,13 @@ static void so_process_relr(so_module *mod, const Elf64_Xword *relr, size_t relr
     if ((entry & 1) == 0) {
       // even entry: address of the next relocation
       where = (uintptr_t)entry;
-      *(uint64_t *)((uintptr_t)mod->load_base + where) += (uint64_t)mod->load_virtbase;
+      *so_relocation_target(mod, where) += (uint64_t)mod->load_virtbase;
       where += 8;
     } else {
       // odd entry: bitmap for the next 63 words
       for (int bit = 1; bit < 64; bit++) {
         if (entry & (1ull << bit))
-          *(uint64_t *)((uintptr_t)mod->load_base + where + (bit - 1) * 8) += (uint64_t)mod->load_virtbase;
+          *so_relocation_target(mod, where + (bit - 1) * 8) += (uint64_t)mod->load_virtbase;
       }
       where += 63 * 8;
     }
@@ -271,7 +444,10 @@ int so_relocate(so_module *mod) {
     if (strcmp(sh_name, ".rela.dyn") == 0 || strcmp(sh_name, ".rela.plt") == 0) {
       Elf64_Rela *rels = (Elf64_Rela *)((uintptr_t)mod->load_base + mod->sec_hdr[i].sh_addr);
       for (int j = 0; j < mod->sec_hdr[i].sh_size / sizeof(Elf64_Rela); j++) {
-        uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_base + rels[j].r_offset);
+        if (ELF64_R_TYPE(rels[j].r_info) == R_AARCH64_NONE) continue;
+        if (ELF64_R_SYM(rels[j].r_info) >= mod->num_syms)
+          fatal_error("Invalid relocation symbol index.");
+        uintptr_t *ptr = so_relocation_target(mod, rels[j].r_offset);
         Elf64_Sym *sym = &mod->syms[ELF64_R_SYM(rels[j].r_info)];
 
         int type = ELF64_R_TYPE(rels[j].r_info);
@@ -316,6 +492,9 @@ int so_relocate(so_module *mod) {
     relr_size = so_dynamic_tag(mod, DT_ANDROID_RELRSZ);
   }
   if (relr_off && relr_size) {
+    if (relr_off > mod->load_size || relr_size > mod->load_size - relr_off ||
+        relr_size % sizeof(Elf64_Xword))
+      fatal_error("Invalid RELR table range.");
     debugPrintf("%s: processing %u bytes of RELR relocations\n", mod->name, (u32)relr_size);
     so_process_relr(mod, (const Elf64_Xword *)((uintptr_t)mod->load_base + relr_off), relr_size);
   }
@@ -371,7 +550,10 @@ int so_resolve(so_module *mod, DynLibFunction *funcs, int num_funcs, int taint_m
     if (strcmp(sh_name, ".rela.dyn") == 0 || strcmp(sh_name, ".rela.plt") == 0) {
       Elf64_Rela *rels = (Elf64_Rela *)((uintptr_t)mod->load_base + mod->sec_hdr[i].sh_addr);
       for (int j = 0; j < mod->sec_hdr[i].sh_size / sizeof(Elf64_Rela); j++) {
-        uintptr_t *ptr = (uintptr_t *)((uintptr_t)mod->load_base + rels[j].r_offset);
+        if (ELF64_R_TYPE(rels[j].r_info) == R_AARCH64_NONE) continue;
+        if (ELF64_R_SYM(rels[j].r_info) >= mod->num_syms)
+          fatal_error("Invalid import symbol index.");
+        uintptr_t *ptr = so_relocation_target(mod, rels[j].r_offset);
         Elf64_Sym *sym = &mod->syms[ELF64_R_SYM(rels[j].r_info)];
 
         int type = ELF64_R_TYPE(rels[j].r_info);
@@ -411,7 +593,7 @@ int so_resolve(so_module *mod, DynLibFunction *funcs, int num_funcs, int taint_m
   if (resolved_abs64)
     debugPrintf("%s: resolved %d ABS64 imports\n", mod->name, resolved_abs64);
 
-  return 0;
+  return missing;
 }
 
 void so_execute_init_array(so_module *mod) {
@@ -477,6 +659,18 @@ int so_unload(so_module *mod) {
     so_free_temp(mod);
   }
 
+#ifdef __SWITCH2__
+  if (mod->nro_address) {
+    Service ro;
+    Result rc = kaihenGetRoSession(&ro);
+    const struct { u64 pid, address; } in = {0, mod->nro_address};
+    if (R_SUCCEEDED(rc)) rc = serviceDispatchIn(&ro, 1, in, .in_send_pid = true);
+    if (R_FAILED(rc)) return -2; // Never free pages still owned by RO.
+    mod->nro_address = 0;
+    free(mod->nro_backing);
+    mod->nro_backing = NULL;
+  }
+#else
   // remap everything as RW
   for (int i = 0; i < mod->phnum; i++) {
     const Elf64_Phdr *p = &mod->phdr[i];
@@ -493,6 +687,7 @@ int so_unload(so_module *mod) {
   virtmemLock();
   virtmemRemoveReservation(mod->load_memrv);
   virtmemUnlock();
+#endif
 
   // remove from list
   if (so_list == mod) {

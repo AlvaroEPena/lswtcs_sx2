@@ -42,7 +42,6 @@ static SLuint32 getAssociatedState(IBufferQueue *this)
     return state;
 }
 
-extern int debugPrintf(char *text, ...);
 extern int opensles_mono_sfx_gain_percent __attribute__((weak));
 
 static void reset_buffer_header(BufferHeader *header)
@@ -156,24 +155,6 @@ static int16_t pcm_mono_to_stereo(int16_t sample, int gain_q15)
     return (int16_t)((scaled + (scaled >= 0 ? 16384 : -16384)) / 32768);
 }
 
-static void log_pcm_convert_once(uint32_t samplerate, int channels, int bps,
-    SLuint32 inSize, SLuint32 outSize)
-{
-    static uint32_t seen[16];
-    static int seen_count = 0;
-    uint32_t key = samplerate ^ ((uint32_t)channels << 24) ^ ((uint32_t)bps << 16);
-    for (int i = 0; i < seen_count; i++) {
-        if (seen[i] == key) {
-            return;
-        }
-    }
-    if (seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
-        seen[seen_count++] = key;
-        debugPrintf("SL: PCM queue convert %u mHz %dch %dbit, %u -> %u bytes\n",
-            samplerate, channels, bps, inSize, outSize);
-    }
-}
-
 SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint32 size)
 {
     SL_ENTER_INTERFACE
@@ -268,7 +249,6 @@ SLresult IBufferQueue_Enqueue(SLBufferQueueItf self, const void *pBuffer, SLuint
                     this->mResampleLast[1] = pcm_read_sample(pBuffer, in_frames,
                         this->channels, this->bps, 1);
                     this->mHaveResampleLast = SL_BOOLEAN_TRUE;
-                    log_pcm_convert_once(this->samplerate, this->channels, this->bps, size, out_size);
                     queueBuffer = ownedBuffer;
                     queueSize = out_size;
                 }
@@ -356,18 +336,11 @@ SLresult IBufferQueue_Clear(SLBufferQueueItf self)
     if (!cleared) {
         // mixer is mid-pass (rare: a pass is microseconds out of each 5.8ms
         // period); fall back to the handshake, acknowledged next pass
-        extern unsigned int sceKernelGetProcessTimeLow(void); // sl_switch.c
-        extern int debugPrintf(char *text, ...);              // util.c
-        static int waits = 0;
-        unsigned int t0 = sceKernelGetProcessTimeLow();
+
         this->mClearRequested = SL_BOOLEAN_TRUE;
         do {
             interface_cond_wait(this);
         } while (this->mClearRequested);
-        int n = ++waits;
-        if (n <= 12 || (n % 500) == 0)
-            debugPrintf("SL: BufferQueue::Clear waited %u us for mixer (wait #%d)\n",
-                        sceKernelGetProcessTimeLow() - t0, n);
     }
 #endif
 

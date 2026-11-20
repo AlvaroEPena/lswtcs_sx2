@@ -6,3 +6,15 @@
 # never commit the copyrighted game binary or data
 libTTapp.so
 *.dat
+
+# Local diagnostics retained outside the normal build/release
+source/crash_report.*
+source/diag_io.*
+source/flight_recorder.*
+source/thread_samples.*
+source/load_trace.s
+source/hub_trace.inc
+*.apk
+*.obb
+SavedGames/
+config.txt

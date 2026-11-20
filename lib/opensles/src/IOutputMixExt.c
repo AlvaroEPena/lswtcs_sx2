@@ -118,7 +118,12 @@ static void *play_callback_thread(void *context)
         assert(0 == ok);
 
         if (event.callback != NULL) {
+
+#ifdef __SWITCH__
+#endif
             (*event.callback)(event.itf, event.context, event.event);
+#ifdef __SWITCH__
+#endif
         }
         complete_play_callback(&event);
     }
@@ -487,7 +492,12 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
                     interface_unlock_exclusive(bufferQueue);
                     // The callback function is called on each buffer completion
                     if (NULL != callback) {
+
+#ifdef __SWITCH__
+#endif
                         (*callback)((SLBufferQueueItf) bufferQueue, context);
+#ifdef __SWITCH__
+#endif
                         // Maybe it enqueued another buffer, or maybe it didn't.
                         // We will find out later during the next mixer frame.
                     }
@@ -547,7 +557,12 @@ void IOutputMixExt_FillBuffer(SLOutputMixExtItf self, void *pBuffer, SLuint32 si
         if (!enqueue_play_callback(&pending[i])) {
             // Queue startup failure or a full queue must not lose HEADATEND.
             // The game callback is short and does not re-enter OpenSL.
+
+#ifdef __SWITCH__
+#endif
             (*pending[i].callback)(pending[i].itf, pending[i].context, pending[i].event);
+#ifdef __SWITCH__
+#endif
             complete_play_callback(&pending[i]);
         }
     }
@@ -618,7 +633,6 @@ SLresult IOutputMixExt_checkAudioPlayerSourceSink(CAudioPlayer *this)
         if (i == MAX_TRACK) {
             interface_unlock_exclusive(omExt);
             // All track slots full in output mix
-            extern int debugPrintf(char *text, ...);
             static unsigned limitHits = 0;
             const unsigned hit = ++limitHits;
             if (hit <= 8 || (hit % 100U) == 0) {

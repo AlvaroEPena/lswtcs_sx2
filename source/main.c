@@ -20,6 +20,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <switch.h>
+#ifdef __SWITCH2__
+#include <kaihen.h>
+#endif
 
 #include "config.h"
 #include "util.h"
@@ -30,9 +33,11 @@
 #include "jni_fake.h"
 #include "pthr.h"
 #include "keycodes.h"
+#include "port_menu.h"
 
 static void *heap_so_base = NULL;
 static size_t heap_so_limit = 0;
+static size_t game_heap_size = 0;
 
 so_module game_mod; // libTTapp.so
 
@@ -76,6 +81,7 @@ void __libnx_initheap(void) {
   extern char *fake_heap_end;
   fake_heap_start = (char *)addr;
   fake_heap_end   = (char *)addr + fake_heap_size;
+  game_heap_size = fake_heap_size;
 
   heap_so_base = (char *)addr + fake_heap_size;
   heap_so_base = (void *)ALIGN_MEM((uintptr_t)heap_so_base, 0x1000);
@@ -83,6 +89,12 @@ void __libnx_initheap(void) {
 }
 
 static void check_syscalls(void) {
+#ifdef __SWITCH2__
+  Service ro;
+  if (R_FAILED(kaihenGetRoSession(&ro)))
+    fatal_error("This Switch 2 build requires kaiHEN hbloader.\n"
+                "Launch it through your working homebrew launcher.");
+#else
   if (!envIsSyscallHinted(0x77))
     fatal_error("svcMapProcessCodeMemory is unavailable.");
   if (!envIsSyscallHinted(0x78))
@@ -91,6 +103,7 @@ static void check_syscalls(void) {
     fatal_error("svcSetProcessMemoryPermission is unavailable.");
   if (envGetOwnProcessHandle() == INVALID_HANDLE)
     fatal_error("Own process handle is unavailable.");
+#endif
 }
 
 static void check_data(void) {
@@ -100,6 +113,16 @@ static void check_data(void) {
     if (stat(files[i], &st) < 0)
       fatal_error("Could not find\n%s.\nCheck your data files in /switch/lswtcs/.", files[i]);
   }
+  unsigned char ident[20] = {0};
+  FILE *so = fopen(SO_NAME, "rb");
+  const size_t got = so ? fread(ident, 1, sizeof(ident), so) : 0;
+  if (so) fclose(so);
+  if (got != sizeof(ident) || memcmp(ident, "\177ELF", 4) ||
+      ident[4] != 2 || ident[5] != 1 || ident[18] != 183 || ident[19] != 0)
+    fatal_error("Wrong libTTapp.so architecture.\n\n"
+                "This port needs Android arm64-v8a (ELF64/AArch64),\n"
+                "v2.0.2.02 / build 20202.\n"
+                "The armeabi-v7a / 32-bit library cannot run here.");
 }
 
 static void set_screen_size(int w, int h) {
@@ -293,7 +316,9 @@ static void update_gamepad(void) {
   if (!connected)
     return;
 
-  const u64 down = padGetButtons(&pad);
+  const u64 physical = padGetButtons(&pad);
+  const int menu_capture = port_menu_handle_input(physical, padGetButtonsDown(&pad));
+  const u64 down = menu_capture ? 0 : physical;
   const u64 changed = down ^ pad_prev;
 
   for (unsigned i = 0; i < sizeof(pad_map) / sizeof(*pad_map); i++) {
@@ -309,6 +334,12 @@ static void update_gamepad(void) {
   const float scale = 1.f / 32767.0f;
   const HidAnalogStickState ls = padGetStickPos(&pad, 0);
   const HidAnalogStickState rs = padGetStickPos(&pad, 1);
+
+  if (menu_capture) {
+    act.nativeUpdateGamepadAxisValues(fake_env, ACTIVITY_CLASS,
+                                      0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    return;
+  }
 
   // Android Y axes point down; Switch sticks point up -> negate
   float lx = (float)ls.x * scale;
@@ -344,6 +375,15 @@ static int touch_slot_alloc(void) {
 }
 
 static void update_touch(void) {
+  if (port_menu_blocks_input()) {
+    for (int i = 0; i < MAX_TOUCHES; ++i) {
+      if (touch_prev[i].active) {
+        act.nativeOnTouchUp(fake_env, ACTIVITY_CLASS, i, i);
+        touch_prev[i].active = 0;
+      }
+    }
+    return;
+  }
   HidTouchScreenState state = { 0 };
   if (!hidGetTouchScreenStates(&state, 1))
     return;
@@ -387,14 +427,13 @@ int main(void) {
 
   if (read_config(CONFIG_NAME) < 0)
     write_config(CONFIG_NAME);
+  port_menu_init();
 
   check_syscalls();
   check_data();
   set_screen_size(config.screen_width, config.screen_height);
 
-  extern char *fake_heap_start;
-  const unsigned heap_mb =
-      (unsigned)(((char *)heap_so_base - fake_heap_start) / (1024 * 1024));
+  const unsigned heap_mb = (unsigned)(game_heap_size / (1024 * 1024));
   debugPrintf("heap: newlib %u MB, lib base %p, lib region %u MB\n",
               heap_mb, heap_so_base, (unsigned)(heap_so_limit / (1024 * 1024)));
 
@@ -403,22 +442,31 @@ int main(void) {
   // mid-load. Fail up front with instructions instead.
   if (heap_mb < 1500)
     fatal_error("Not enough memory (%u MB).\n\n"
-                "Launch hbmenu over a game (hold R while\n"
-                "starting any installed title), then start\n"
-                "this port from there.", heap_mb);
+                "Launch through kaiHEN with a native game host\n"
+                "that provides sufficient application memory.", heap_mb);
 
   if (so_load(&game_mod, SO_NAME, heap_so_base, heap_so_limit) < 0)
     fatal_error("Could not load\n%s.", SO_NAME);
 
   update_imports();
+#ifdef __SWITCH2__
+  patch_game_code();
+  so_finalize(&game_mod);
+#endif
   so_relocate(&game_mod);
-  so_resolve(&game_mod, dynlib_functions, dynlib_numfunctions, 1);
+  if (so_resolve(&game_mod, dynlib_functions, dynlib_numfunctions, 1) != 0)
+    fatal_error("The game library has unsupported Android imports.");
 
   patch_game();
 
   resolve_entry_points();
 
+#ifdef __SWITCH2__
+  so_publish_data(&game_mod);
+#else
+  patch_game_code();
   so_finalize(&game_mod);
+#endif
   so_flush_caches(&game_mod);
 
   // the main thread needs the fake TLS (TPIDR_EL0 stack-guard cookie) BEFORE
@@ -473,6 +521,8 @@ int main(void) {
 #endif
     update_gamepad();
     update_touch();
+    // Independent fallback for the event history if context sampling cannot
+    // start. The recorder never waits for an already-running flush.
     // ~120 Hz input polling; the game renders on its own thread
     svcSleepThread(1000000000ull / 120);
 
@@ -510,16 +560,15 @@ int main(void) {
                   dr_win - last_draw_win,
                   dr_pbuf - last_draw_pbuf,
                   dr_skip - last_draw_skip);
-      // in-game deadman: swaps frozen for two heartbeats (~20s) after having
-      // rendered -> crash so Atmosphère dumps every thread's stack
+      // A level load or shader compile may legitimately stop presentation.
+      // Report it without deliberately crashing a working loading thread.
       if (swaps == last_swaps && swaps > 100)
         stall_beats++;
       else
         stall_beats = 0;
-      if (stall_beats >= 2) {
-        debugPrintf("deadman: render stalled in-game (swaps frozen at %d for %d heartbeats) -> forcing crash for full thread dump\n",
+      if (stall_beats == 2) {
+        debugPrintf("watchdog: no new frames (swaps %d for %d heartbeats); continuing to wait during possible loading\n",
                     swaps, stall_beats);
-        *(volatile u32 *)0 = 0xDEADD00D;
       }
       last_swaps = swaps;
       last_mc = mc;
@@ -533,12 +582,10 @@ int main(void) {
       last_draw_skip = dr_skip;
     }
 
-    // boot deadman: no real rendering after 30s -> crash on purpose so
-    // Atmosphère writes a report with every thread's PC and stack
+    // Slow first-boot shader compilation is diagnostic, not a fatal error.
     if (ticks == 3600 && egl_swap_count < 10) {
-      debugPrintf("deadman: boot stalled (swaps=%d, makeCurrent=%d) -> forcing crash for full thread dump\n",
+      debugPrintf("watchdog: slow boot (swaps=%d, makeCurrent=%d); continuing to wait\n",
                   egl_swap_count, egl_makecurrent_count);
-      *(volatile u32 *)0 = 0xDEADDEAD;
     }
 #endif
   }

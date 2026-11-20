@@ -138,9 +138,6 @@ static __thread FakePbuffer *tls_bound_fake = NULL;
 static __thread GLuint tls_bound_vfbo = 0;
 static __thread CtxOwner *tls_bound_rec = NULL;
 
-volatile int egl_real_makecurrent_count = 0;
-volatile int egl_owner_release_count = 0;
-
 // find or create the owner record for a real context; call with mutex held
 static CtxOwner *ctx_owner_rec(EGLContext ctx) {
   for (int i = 0; i < ctx_owner_count; i++)
@@ -359,7 +356,9 @@ static PbufferTarget *ensure_fake_pbuffer_target(FakePbuffer *surf, EGLContext c
   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                          GL_TEXTURE_2D, t->color, 0);
   GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+#ifdef DEBUG_LOG
   GLenum err = glGetError();
+#endif
   t->ready = (status == GL_FRAMEBUFFER_COMPLETE);
   debugPrintf("EGL: fake pbuffer target ctx=%p fbo=%u tex=%u %dx%d status=0x%x err=0x%x\n",
               ctx, t->fbo, t->color, surf->width, surf->height, status, err);
@@ -387,8 +386,7 @@ static void bind_virtual_framebuffer_for_context(void) {
 static void release_gl_ownership(void) {
   if (tls_bound_ctx == EGL_NO_CONTEXT)
     return;
-  ++egl_owner_release_count;
-  ++egl_real_makecurrent_count;
+
   eglMakeCurrent(last_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
   pthread_mutex_lock(&gl_owner_mutex);
   if (tls_bound_rec && tls_bound_rec->owner_valid &&
@@ -410,17 +408,13 @@ static void release_gl_ownership(void) {
 // EXCEPTION: the render thread parks every frame; it keeps the binding
 // unless someone is already waiting (its wait shims service handover in
 // short slices), so uncontended frames pay no unbind/rebind.
-volatile int egl_park_keep_count = 0;
-volatile int egl_park_release_count = 0;
 
 void egl_gl_ownership_park(void) {
   extern int pthr_is_render_thread(void);
   if (pthr_is_render_thread() && tls_bound_rec && !tls_bound_rec->release_requested) {
-    ++egl_park_keep_count;
+
     return;
   }
-  if (tls_bound_ctx != EGL_NO_CONTEXT)
-    ++egl_park_release_count;
   release_gl_ownership();
 }
 
@@ -515,10 +509,16 @@ static EGLBoolean begin_gl_call(const char *why) {
 
   // (re)bind the desired context+surface on this thread
   if (tls_bound_ctx != want || tls_bound_draw != draw) {
-    ++egl_real_makecurrent_count;
+
     EGLBoolean r = eglMakeCurrent(last_dpy, draw, read, want);
     if (r != EGL_TRUE) {
-      EGLint err = eglGetError();
+#ifdef DEBUG_LOG
+    #ifdef DEBUG_LOG
+  EGLint err = eglGetError();
+#else
+  (void)eglGetError();
+#endif
+#endif
       static int n = 0;
       if (n++ < 60)
         debugPrintf("EGL: bind for %s failed (ctx=%p draw=%p err=0x%x)\n",
@@ -554,14 +554,16 @@ static EGLBoolean begin_gl_call(const char *why) {
 static void end_gl_call(void) {
   if (gl_context_depth <= 0)
     return;
-  if (--gl_context_depth > 0)
+  if (--gl_context_depth > 0) {
     return;
+  }
   // hand the context over only when somebody is actually waiting; otherwise
   // stay bound so the next call from this thread is free
   if (tls_bound_rec && tls_bound_rec->release_requested)
     release_gl_ownership();
 }
 
+#ifdef DEBUG_LOG
 static const char *surface_kind(void) {
   if (current_fake_draw)
     return "pbuffer";
@@ -569,9 +571,11 @@ static const char *surface_kind(void) {
     return "none";
   return "window";
 }
+#endif
 
 // log a shader/program info log only when there's something to say (a compile
 // or link diagnostic); cheap and only fires on the rare interesting case
+#ifdef DEBUG_LOG
 static void log_info_log_shader(GLuint shader) {
   GLint len = 0;
   glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &len);
@@ -582,7 +586,9 @@ static void log_info_log_shader(GLuint shader) {
   buf[sizeof(buf) - 1] = '\0';
   debugPrintf("GL: shader %u info: %s\n", shader, buf);
 }
+#endif
 
+#ifdef DEBUG_LOG
 static void log_info_log_program(GLuint program) {
   GLint len = 0;
   glGetProgramiv(program, GL_INFO_LOG_LENGTH, &len);
@@ -593,6 +599,7 @@ static void log_info_log_program(GLuint program) {
   buf[sizeof(buf) - 1] = '\0';
   debugPrintf("GL: program %u info: %s\n", program, buf);
 }
+#endif
 
 EGLDisplay eglGetDisplayHook(EGLNativeDisplayType display_id) {
   EGLDisplay dpy = eglGetDisplay(display_id);
@@ -713,7 +720,11 @@ EGLSurface eglCreatePbufferSurfaceHook(EGLDisplay dpy, EGLConfig config,
     debugPrintf("EGL: eglCreatePbufferSurface -> %p (real)\n", s);
     return s;
   }
+#ifdef DEBUG_LOG
   EGLint err = eglGetError();
+#else
+  (void)eglGetError();
+#endif
   if (fake_pbuffer_count >= MAX_FAKE_PBUFFERS) {
     debugPrintf("EGL: eglCreatePbufferSurface failed (err 0x%x), no fake slots left\n", err);
     return EGL_NO_SURFACE;
@@ -755,7 +766,7 @@ EGLBoolean eglDestroySurfaceHook(EGLDisplay dpy, EGLSurface surface) {
 
 // counts every eglMakeCurrent; the main-loop heartbeat reports the delta so we
 // can tell a spinning loader thread (count exploding) from a stalled one
-volatile int egl_makecurrent_count = 0;
+static int egl_makecurrent_count = 0;
 
 EGLBoolean eglMakeCurrentHook(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) {
   const int n = ++egl_makecurrent_count;
@@ -843,7 +854,10 @@ EGLBoolean eglQuerySurfaceHook(EGLDisplay dpy, EGLSurface surface, EGLint attrib
 volatile int egl_swap_count = 0;
 
 EGLBoolean eglSwapBuffersHook(EGLDisplay dpy, EGLSurface surface) {
-  const int n = ++egl_swap_count;
+  ++egl_swap_count;
+#ifdef DEBUG_LOG
+  const int n = egl_swap_count;
+#endif
   if (!begin_gl_call("eglSwapBuffers"))
     return EGL_FALSE;
 
@@ -853,6 +867,7 @@ EGLBoolean eglSwapBuffersHook(EGLDisplay dpy, EGLSurface surface) {
     debugPrintf("EGL: eglSwapBuffers #%d (glGetError=0x%x)\n", n, gerr);
   }
 
+#ifdef DEBUG_GL_PROBES
   // probe the frame about to be presented: reads the center pixel of the
   // backbuffer. Tells black-content (probe black, present fine) apart from
   // broken present (probe shows content, screen stays black) in one log line.
@@ -870,7 +885,7 @@ EGLBoolean eglSwapBuffersHook(EGLDisplay dpy, EGLSurface surface) {
     glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fbo);
   }
 #endif
-
+#endif
 
   EGLBoolean r = eglSwapBuffers(dpy, surface);
   if (r != EGL_TRUE) {
@@ -937,15 +952,19 @@ static void glFramebufferTexture2DProcHook(GLenum target, GLenum attachment,
   GLint fbo = 0;
   if (!begin_gl_call("glFramebufferTexture2D"))
     return;
+#ifdef DEBUG_LOG
   if (n++ < 40) {
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
     debugPrintf("GL: glFramebufferTexture2D target=0x%x fbo=%d att=0x%x texTarget=0x%x tex=%u level=%d surf=%s ctx=%p\n",
                 target, fbo, attachment, textarget, texture, level, surface_kind(), current_ctx);
   }
+#endif
   glFramebufferTexture2D(target, attachment, textarget, texture, level);
+#ifdef DEBUG_LOG
   GLenum e = glGetError();
   if (e)
     debugPrintf("GL: glFramebufferTexture2D err=0x%x\n", e);
+#endif
   end_gl_call();
 }
 
@@ -955,15 +974,19 @@ static void glFramebufferRenderbufferProcHook(GLenum target, GLenum attachment,
   GLint fbo = 0;
   if (!begin_gl_call("glFramebufferRenderbuffer"))
     return;
+#ifdef DEBUG_LOG
   if (n++ < 40) {
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
     debugPrintf("GL: glFramebufferRenderbuffer target=0x%x fbo=%d att=0x%x rbTarget=0x%x rb=%u surf=%s ctx=%p\n",
                 target, fbo, attachment, renderbuffertarget, renderbuffer, surface_kind(), current_ctx);
   }
+#endif
   glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer);
+#ifdef DEBUG_LOG
   GLenum e = glGetError();
   if (e)
     debugPrintf("GL: glFramebufferRenderbuffer err=0x%x\n", e);
+#endif
   end_gl_call();
 }
 
@@ -987,9 +1010,11 @@ static void glRenderbufferStorageProcHook(GLenum target, GLenum internalformat,
     debugPrintf("GL: glRenderbufferStorage target=0x%x ifmt=0x%x %dx%d surf=%s ctx=%p\n",
                 target, internalformat, width, height, surface_kind(), current_ctx);
   glRenderbufferStorage(target, internalformat, width, height);
+#ifdef DEBUG_LOG
   GLenum e = glGetError();
   if (e)
     debugPrintf("GL: glRenderbufferStorage err=0x%x\n", e);
+#endif
   end_gl_call();
 }
 
@@ -1100,10 +1125,12 @@ void glCopyTexImage2DHook(GLenum target, GLint level, GLenum internalformat,
   if (!begin_gl_call("glCopyTexImage2D"))
     return;
   glCopyTexImage2D(target, level, internalformat, x, y, width, height, border);
+#ifdef DEBUG_LOG
   GLenum e = glGetError();
   if (e)
     debugPrintf("GL: glCopyTexImage2D target=0x%x ifmt=0x%x %dx%d at %d,%d -> err=0x%x\n",
                 target, internalformat, width, height, x, y, e);
+#endif
   end_gl_call();
 }
 
@@ -1127,12 +1154,14 @@ void glCompileShaderHook(GLuint shader) {
   if (!begin_gl_call("glCompileShader"))
     return;
   glCompileShader(shader);
+#ifdef DEBUG_LOG
   GLint ok = 1;
   glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
   if (!ok) { // only the failures are interesting
     debugPrintf("GL: glCompileShader shader=%u FAILED\n", shader);
     log_info_log_shader(shader);
   }
+#endif
   end_gl_call();
 }
 
@@ -1162,15 +1191,19 @@ void glLinkProgramHook(GLuint program) {
   if (!begin_gl_call("glLinkProgram"))
     return;
   glLinkProgram(program);
+#ifdef DEBUG_LOG
   GLint ok = 1;
   glGetProgramiv(program, GL_LINK_STATUS, &ok);
   if (!ok) { // only the failures are interesting
     debugPrintf("GL: glLinkProgram program=%u FAILED\n", program);
     log_info_log_program(program);
   }
+#endif
+#ifdef DEBUG_LOG
   GLenum e = glGetError();
   if (e)
     debugPrintf("GL: glLinkProgram program=%u err=0x%x\n", program, e);
+#endif
   end_gl_call();
 }
 
@@ -1205,6 +1238,7 @@ void glDisableVertexAttribArrayHook(GLuint index) {
   end_gl_call();
 }
 
+#ifdef DEBUG_LOG
 static int seen_format(GLenum fmt) {
   static GLenum seen[32];
   static int n = 0;
@@ -1213,6 +1247,7 @@ static int seen_format(GLenum fmt) {
   if (n < 32) seen[n++] = fmt;
   return 0;
 }
+#endif
 
 void glCompressedTexImage2DHook(GLenum target, GLint level, GLenum internalformat,
                                 GLsizei width, GLsizei height, GLint border,
@@ -1220,11 +1255,13 @@ void glCompressedTexImage2DHook(GLenum target, GLint level, GLenum internalforma
   if (!begin_gl_call("glCompressedTexImage2D"))
     return;
   glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, data);
+#ifdef DEBUG_LOG
   if (!seen_format(internalformat)) {
     GLenum e = glGetError();
     debugPrintf("GL: glCompressedTexImage2D fmt=0x%x %dx%d level=%d size=%d -> err=0x%x\n",
                 internalformat, width, height, level, imageSize, e);
   }
+#endif
   end_gl_call();
 }
 
@@ -1234,12 +1271,14 @@ void glTexImage2DHook(GLenum target, GLint level, GLint internalformat, GLsizei 
   if (!begin_gl_call("glTexImage2D"))
     return;
   glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+#ifdef DEBUG_LOG
   GLenum key = (GLenum)internalformat | 0x80000000u; // distinguish from compressed
   if (!seen_format(key)) {
     GLenum e = glGetError();
     debugPrintf("GL: glTexImage2D ifmt=0x%x fmt=0x%x type=0x%x %dx%d -> err=0x%x\n",
                 internalformat, format, type, width, height, e);
   }
+#endif
   end_gl_call();
 }
 
@@ -1575,14 +1614,8 @@ void glValidateProgramHook(GLuint program) {
 // and what does it clear to? Counters are read by the main-loop heartbeat.
 // ---------------------------------------------------------------------------
 
-volatile int gl_draw_count = 0;
-volatile int gl_draw_window_count = 0;
-volatile int gl_draw_pbuffer_count = 0;
-volatile int gl_draw_pbuffer_skip_count = 0;
-
 static int skip_fake_pbuffer_default_draw(void) {
   if (current_fake_draw && current_virtual_fbo == 0) {
-    ++gl_draw_pbuffer_skip_count;
     if (tls_bound_rec && tls_bound_rec->release_requested)
       release_gl_ownership();
     return 1;
@@ -1614,13 +1647,8 @@ void glClearColorHook(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
 }
 
 void glDrawElementsHook(GLenum mode, GLsizei count, GLenum type, const void *indices) {
-  ++gl_draw_count; // read by the heartbeat
   if (skip_fake_pbuffer_default_draw())
     return;
-  if (current_fake_draw)
-    ++gl_draw_pbuffer_count;
-  else
-    ++gl_draw_window_count;
   if (!begin_gl_call("glDrawElements"))
     return;
   glDrawElements(mode, count, type, indices);
@@ -1628,13 +1656,8 @@ void glDrawElementsHook(GLenum mode, GLsizei count, GLenum type, const void *ind
 }
 
 void glDrawArraysHook(GLenum mode, GLint first, GLsizei count) {
-  ++gl_draw_count;
   if (skip_fake_pbuffer_default_draw())
     return;
-  if (current_fake_draw)
-    ++gl_draw_pbuffer_count;
-  else
-    ++gl_draw_window_count;
   if (!begin_gl_call("glDrawArrays"))
     return;
   glDrawArrays(mode, first, count);

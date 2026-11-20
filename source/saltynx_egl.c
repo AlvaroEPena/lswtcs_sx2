@@ -5,6 +5,8 @@
 #include <GLES2/gl2.h>
 
 #include "saltynx.h"
+#include "port_menu.h"
+#include <switch.h>
 
 extern EGLBoolean __real_eglSwapBuffers(EGLDisplay display, EGLSurface surface);
 extern __eglMustCastToProperFunctionPointerType __real_eglGetProcAddress(const char *name);
@@ -26,8 +28,16 @@ EGLBoolean __wrap_eglSwapBuffers(EGLDisplay display, EGLSurface surface) {
         eglQuerySurface(display, surface, EGL_WIDTH, &width);
         eglQuerySurface(display, surface, EGL_HEIGHT, &height);
     }
+    EGLint surface_width = 0, surface_height = 0;
+    PortMenuSnapshot ui;
+    port_menu_snapshot(&ui);
+    if ((ui.open || ui.show_fps) && eglGetCurrentContext() != EGL_NO_CONTEXT &&
+        eglQuerySurface(display, surface, EGL_WIDTH, &surface_width) == EGL_TRUE &&
+        eglQuerySurface(display, surface, EGL_HEIGHT, &surface_height) == EGL_TRUE)
+        port_overlay_draw(surface_width, surface_height);
     const EGLBoolean result = __real_eglSwapBuffers(display, surface);
     if (result == EGL_TRUE) {
+        port_menu_frame_presented(armGetSystemTick(), armGetSystemTickFreq());
         if (width > 0 && height > 0)
             saltynx_set_resolution((uint32_t)width, (uint32_t)height);
         saltynx_frame(2); /* SaltyNX OpenGL / OpenGL ES API identifier. */

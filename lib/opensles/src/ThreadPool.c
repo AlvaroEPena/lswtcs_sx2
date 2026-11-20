@@ -43,7 +43,11 @@ static void *ThreadPool_start(void *context)
         int parameter = pClosure->mParameter;
         free(pClosure);
         assert(NULL != handler);
+#ifdef __SWITCH__
+#endif
         (*handler)(context, parameter);
+#ifdef __SWITCH__
+#endif
     }
     return NULL;
 }

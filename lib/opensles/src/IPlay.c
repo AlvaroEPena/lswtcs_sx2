@@ -39,7 +39,6 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
             (CAudioPlayer *) this->mThis : NULL;
         interface_lock_exclusive(this);
 #ifdef USE_OUTPUTMIXEXT
-        unsigned int stop_wait_t0 = 0;
         for (;; interface_cond_wait(this)) {
 
             // We are comparing the old state (left) vs. new state (right).
@@ -114,9 +113,6 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
                 }
                 // mixer is mid-pass (rare): stock handshake, bounded by one
                 // mixer period; timed so debug.log shows the residual cost
-                stop_wait_t0 = sceKernelGetProcessTimeLow();
-                if (0 == stop_wait_t0)
-                    stop_wait_t0 = 1;
                 this->mState = SL_PLAYSTATE_STOPPING;
                 }
                 continue;
@@ -130,14 +126,6 @@ static SLresult IPlay_SetPlayState(SLPlayItf self, SLuint32 state)
             }
 
             break;
-        }
-        if (0 != stop_wait_t0) {
-            extern int debugPrintf(char *text, ...); // util.c
-            static int stop_waits = 0;
-            int n = ++stop_waits;
-            if (n <= 12 || (n % 500) == 0)
-                debugPrintf("SL: SetPlayState(STOPPED) waited %u us for mixer (wait #%d)\n",
-                            sceKernelGetProcessTimeLow() - stop_wait_t0, n);
         }
 #else
         // Here life looks easy for an Android, but there are other troubles in play land
